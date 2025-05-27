@@ -17,6 +17,12 @@ try {
     $successMessage = '';
     $errorMessage = '';
     $advisor = null;
+    $activeTab = isset($_GET['tab']) ? $_GET['tab'] : 'assign';
+
+    // Clear message details if action was successful
+    if (isset($_GET['action']) && $_GET['action'] === 'success') {
+        $selectedMessage = null;
+    }
 
     if (isset($_SESSION['user']) && $_SESSION['user']['role'] === 'medical_advisor') {
         $advisorId = $_SESSION['user']['id'];
@@ -29,8 +35,9 @@ try {
             $advisorName = $advisor['name'];
         }
 
+        // Get unread messages
         $stmt = $pdo->prepare("
-            SELECT m.id, m.content, m.created_at, p.name as patient_name 
+            SELECT m.id, m.content, m.created_at, m.patient_id, p.name as patient_name 
             FROM messages m
             JOIN patients p ON m.patient_id = p.id
             WHERE m.is_used = FALSE
@@ -39,9 +46,10 @@ try {
         $stmt->execute();
         $messages = $stmt->fetchAll(PDO::FETCH_ASSOC);
 
-        if (isset($_GET['message_id'])) {
+        // Get selected message details if not clearing
+        if (isset($_GET['message_id']) && !isset($_GET['action'])) {
             $stmt = $pdo->prepare("
-                SELECT m.id, m.content, m.created_at, p.name as patient_name, p.gender, p.dob 
+                SELECT m.id, m.content, m.created_at, m.patient_id, p.name as patient_name, p.gender, p.dob 
                 FROM messages m
                 JOIN patients p ON m.patient_id = p.id
                 WHERE m.id = ?
@@ -50,16 +58,20 @@ try {
             $selectedMessage = $stmt->fetch(PDO::FETCH_ASSOC);
         }
 
+        // Assign doctor action
         if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['assign_doctor'])) {
             $messageId = $_POST['message_id'];
             $doctorType = $_POST['doctor_type'];
             $doctorId = $_POST['doctor_id'];
             
+            try {
+                $pdo->beginTransaction();
 
-            $stmt = $pdo->prepare("UPDATE messages SET is_used = TRUE WHERE id = ?");
-            $stmt->execute([$messageId]);
+                // Mark message as used
+                $stmt = $pdo->prepare("UPDATE messages SET is_used = TRUE WHERE id = ?");
+                $stmt->execute([$messageId]);
 
-            if (!empty($doctorId) && !empty($doctorType)) {
+                // Create assignment
                 $stmt = $pdo->prepare("
                     INSERT INTO assignments 
                     (message_id, assigned_by, assigned_to_role, assigned_to_id)
@@ -69,15 +81,57 @@ try {
                     $messageId,
                     $advisorId,
                     $doctorType,
-                    $doctorId,
-                    
+                    $doctorId
                 ]);
-               $successMessage = "تم تعيين المريض بنجاح إلى الطبيب المختص";
 
-            } else {
-                $errorMessage = "حدث خطأ أثناء تعيين المريض، يرجى المحاولة مرة أخرى";            }
+                $pdo->commit();
+                header("Location: advisor_dashboard.php?action=success&success=assign");
+                exit();
+            } catch (Exception $e) {
+                $pdo->rollBack();
+                $errorMessage = "حدث خطأ أثناء تعيين المريض: " . $e->getMessage();
+            }
         }
 
+        // Schedule appointment action
+        if ($_SERVER['REQUEST_METHOD'] === 'POST' && isset($_POST['schedule_appointment'])) {
+            $messageId = $_POST['message_id'];
+            $patientId = $_POST['patient_id'];
+            $appointmentDate = $_POST['appointment_date'];
+            $appointmentTime = $_POST['appointment_time'];
+            $appointmentDateTime = $appointmentDate . ' ' . $appointmentTime;
+
+            try {
+                $pdo->beginTransaction();
+
+                // Mark message as used
+                $stmt = $pdo->prepare("UPDATE messages SET is_used = TRUE WHERE id = ?");
+                $stmt->execute([$messageId]);
+
+                // Create appointment
+                $stmt = $pdo->prepare("
+                    INSERT INTO appointments 
+                    (patient_id, professional_id, professional_type, appointment_date, status)
+                    VALUES (?, ?, ?, ?, ?)
+                ");
+                $stmt->execute([
+                    $patientId,
+                    $advisorId,
+                    'advisor',
+                    $appointmentDateTime,
+                    'scheduled'
+                ]);
+
+                $pdo->commit();
+                header("Location: advisor_dashboard.php?action=success&success=appointment");
+                exit();
+            } catch (Exception $e) {
+                $pdo->rollBack();
+                $errorMessage = "حدث خطأ أثناء جدولة الموعد: " . $e->getMessage();
+            }
+        }
+
+        // Get available doctors
         $professionalTables = [
             'educational_psychologists' => 'أخصائي تربوي',
             'speech_therapists' => 'معالج نطق',
@@ -101,30 +155,28 @@ try {
     }
 
 } catch (PDOException $e) {
-    $errorMessage = "\u26d4 \u062e\u0637\u0623 \u0641\u064a \u0642\u0627\u0639\u062f\u0629 \u0627\u0644\u0628\u064a\u0627\u0646\u0627\u062a: " . $e->getMessage();
+    $errorMessage = "⚠ خطأ في قاعدة البيانات: " . $e->getMessage();
+}
+
+// Set success message if redirected after success
+if (isset($_GET['success'])) {
+    $successMessage = ($_GET['success'] === 'assign') 
+        ? "تم تعيين المريض بنجاح إلى الطبيب المختص" 
+        : "تم جدولة الموعد بنجاح";
 }
 ?>
 <!DOCTYPE html>
 <html lang="ar" dir="rtl">
-
 <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1, shrink-to-fit=no">
     <meta name="description" content="لوحة تحكم المستشار - MyPsyDz">
     <meta name="author" content="MyPsyDz">
     <link href="https://fonts.googleapis.com/css?family=Tajawal:300,400,500,700,800,900&display=swap" rel="stylesheet">
-    <!-- Font Awesome CDN -->
-<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
-
-
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.5.0/css/all.min.css">
     <title>لوحة تحكم المستشار - MyPsyDz</title>
-
-    <!-- Bootstrap core CSS -->
     <link href="vendor/bootstrap/css/bootstrap.min.css" rel="stylesheet">
-
-    <!-- Additional CSS Files -->
     <link rel="stylesheet" href="assets/css/fontawesome.css">
-    
     <style>
         body {
             font-family: 'Tajawal', sans-serif;
@@ -158,7 +210,9 @@ try {
             padding: 20px;
         }
         .sidebar-menu a {
-            display: block;
+            display: flex;
+            align-items: center;
+            gap: 10px;
             color: white;
             padding: 12px 15px;
             margin: 5px 0;
@@ -168,9 +222,6 @@ try {
         }
         .sidebar-menu a:hover, .sidebar-menu a.active {
             background-color: rgba(255,255,255,0.1);
-        }
-        .sidebar-menu a i {
-            margin-left: 10px;
         }
         .card {
             border: none;
@@ -224,6 +275,11 @@ try {
             color: white;
             border: none;
         }
+        .btn-appointment {
+            background: linear-gradient(135deg, #2196F3, #0b7dda);
+            color: white;
+            border: none;
+        }
         .unread-badge {
             background-color: #ff4757;
             color: white;
@@ -255,12 +311,48 @@ try {
             background-color: #4CAF50;
             color: white;
         }
-        .sidebar-menu a {
-    display: flex;
-    align-items: center;
-    gap: 10px;
-}
-
+        .appointment-form {
+            background-color: #f8f9fa;
+            padding: 20px;
+            border-radius: 8px;
+        }
+        .form-row {
+            display: flex;
+            flex-wrap: wrap;
+            margin-right: -5px;
+            margin-left: -5px;
+        }
+        .form-group {
+            margin-bottom: 1rem;
+        }
+        .col-md-6 {
+            flex: 0 0 50%;
+            max-width: 50%;
+            padding-right: 5px;
+            padding-left: 5px;
+        }
+        .nav-tabs .nav-link {
+            border: none;
+            color: #495057;
+            font-weight: 500;
+        }
+        .nav-tabs .nav-link.active {
+            color: #6e8efb;
+            border-bottom: 2px solid #6e8efb;
+            background-color: transparent;
+        }
+        .tab-content {
+            padding: 20px 0;
+        }
+        .success-message {
+            text-align: center;
+            padding: 20px;
+        }
+        .success-message i {
+            font-size: 3rem;
+            color: #4CAF50;
+            margin-bottom: 15px;
+        }
     </style>
 </head>
 <body>
@@ -271,18 +363,17 @@ try {
         <div class="sidebar-header">
             <img src="assets/images/advisor.jpg" alt="صورة المستشار">
             <h5><?= htmlspecialchars($advisorName) ?></h5>
-            <p>مستشار رئيسي</p>
+            <p>أخصائي نفسي عيادي</p>
         </div>
         <div class="sidebar-menu">
-    <a href="advisor_dashboard.php" class="active"><i class="fas fa-tachometer-alt"></i> لوحة التحكم</a>
-    <a href="#"><i class="fas fa-user-injured"></i> المرضى</a>
-    <a href="advisor_dashboard.php"><i class="fas fa-envelope-open-text"></i> الرسائل <span class="unread-badge"><?= count($messages) ?></span></a>
-    <a href="#"><i class="fas fa-user-md"></i> الأطباء</a>
-    <a href="#"><i class="fas fa-calendar-check"></i> المواعيد</a>
-    <a href="#"><i class="fas fa-sliders-h"></i> الإعدادات</a>
-    <a href="logout.php"><i class="fas fa-sign-out-alt"></i> تسجيل الخروج</a>
-</div>
-
+            <a href="advisor_dashboard.php" class="active"><i class="fas fa-tachometer-alt"></i> لوحة التحكم</a>
+            <a href="#"><i class="fas fa-user-injured"></i> المرضى</a>
+            <a href="advisor_dashboard.php"><i class="fas fa-envelope-open-text"></i> الرسائل <span class="unread-badge"><?= count($messages) ?></span></a>
+            <a href="#"><i class="fas fa-user-md"></i> الأطباء</a>
+            <a href="#"><i class="fas fa-calendar-check"></i> المواعيد</a>
+            <a href="#"><i class="fas fa-sliders-h"></i> الإعدادات</a>
+            <a href="logout.php"><i class="fas fa-sign-out-alt"></i> تسجيل الخروج</a>
+        </div>
     </div>
 
     <!-- Main Content -->
@@ -333,12 +424,12 @@ try {
                 </div>
             </div>
             
-            <!-- Message Details and Assignment -->
+            <!-- Message Details and Actions -->
             <div class="col-md-7">
                 <?php if ($selectedMessage): ?>
                 <div class="card">
                     <div class="card-header">
-                        تفاصيل الرسالة وتعيين الطبيب
+                        تفاصيل الرسالة
                     </div>
                     <div class="card-body">
                         <!-- Patient Info -->
@@ -362,36 +453,73 @@ try {
                             <div class="message-time">تم الإرسال: <?= date('Y-m-d H:i', strtotime($selectedMessage['created_at'])) ?></div>
                         </div>
                         
-                        <!-- Assignment Form -->
-                        <div class="mt-4">
-                            <h5>تعيين المريض إلى طبيب</h5>
-                            <form method="POST" action="">
-                                <input type="hidden" name="message_id" value="<?= $selectedMessage['id'] ?>">
-                                
-                                <div class="form-group">
-                                    <label for="doctorSelect">اختر الطبيب المتخصص</label>
-                                    <select class="doctor-select" id="doctorSelect" name="doctor_id" required>
-                                        <option value="">-- اختر الطبيب --</option>
-                                        <?php foreach ($doctors as $doctor): ?>
-                                        <option value="<?= $doctor['id'] ?>" data-type="<?= $doctor['type'] ?>">
-                                            <?= htmlspecialchars($doctor['name']) ?> - <?= $doctor['title'] ?>
-                                        </option>
-                                        <?php endforeach; ?>
-                                    </select>
-                                    <input type="hidden" name="doctor_type" id="doctorType" value="">
-                                </div>
-                                
-                                <div class="form-group">
-                                    <label for="advisorNotes">ملاحظات إضافية</label>
-                                    <textarea class="form-control" id="advisorNotes" name="notes" rows="3" placeholder="أضف أي ملاحظات أو توجيهات للطبيب..."></textarea>
-                                </div>
-                                
-                                <div class="d-flex justify-content-between mt-3">
-                                    <button type="button" class="btn btn-outline-secondary">طلب معلومات إضافية</button>
-                                    <button type="submit" name="assign_doctor" class="btn btn-assign">تعيين المريض</button>
-                                </div>
-                            </form>
+                        <!-- Actions Tabs -->
+                        <ul class="nav nav-tabs mt-4">
+                            <li class="nav-item">
+                                <a class="nav-link <?= $activeTab === 'assign' ? 'active' : '' ?>" href="?message_id=<?= $selectedMessage['id'] ?>&tab=assign">تعيين لطبيب</a>
+                            </li>
+                            <li class="nav-item">
+                                <a class="nav-link <?= $activeTab === 'appointment' ? 'active' : '' ?>" href="?message_id=<?= $selectedMessage['id'] ?>&tab=appointment">جدولة موعد</a>
+                            </li>
+                        </ul>
+                        
+                        <div class="tab-content">
+                            <!-- Assign to Doctor Tab -->
+                            <div class="tab-pane <?= $activeTab === 'assign' ? 'active' : '' ?>">
+                                <form method="POST" action="">
+                                    <input type="hidden" name="message_id" value="<?= $selectedMessage['id'] ?>">
+                                    <input type="hidden" name="patient_id" value="<?= $selectedMessage['patient_id'] ?>">
+                                    
+                                    <div class="form-group">
+                                        <label for="doctorSelect">اختر الطبيب المتخصص</label>
+                                        <select class="doctor-select" id="doctorSelect" name="doctor_id" required>
+                                            <option value="">-- اختر الطبيب --</option>
+                                            <?php foreach ($doctors as $doctor): ?>
+                                            <option value="<?= $doctor['id'] ?>" data-type="<?= $doctor['type'] ?>">
+                                                <?= htmlspecialchars($doctor['name']) ?> - <?= $doctor['title'] ?>
+                                            </option>
+                                            <?php endforeach; ?>
+                                        </select>
+                                        <input type="hidden" name="doctor_type" id="doctorType" value="">
+                                    </div>
+                                    
+                                    <div class="d-flex justify-content-end mt-3">
+                                        <button type="submit" name="assign_doctor" class="btn btn-assign">تعيين المريض</button>
+                                    </div>
+                                </form>
+                            </div>
+                            
+                            <!-- Schedule Appointment Tab -->
+                            <div class="tab-pane <?= $activeTab === 'appointment' ? 'active' : '' ?>">
+                                <form method="POST" action="">
+                                    <input type="hidden" name="message_id" value="<?= $selectedMessage['id'] ?>">
+                                    <input type="hidden" name="patient_id" value="<?= $selectedMessage['patient_id'] ?>">
+                                    
+                                    <div class="form-row">
+                                        <div class="form-group col-md-6">
+                                            <label for="appointmentDate">تاريخ الموعد</label>
+                                            <input type="date" class="form-control" id="appointmentDate" name="appointment_date" required min="<?= date('Y-m-d') ?>">
+                                        </div>
+                                        <div class="form-group col-md-6">
+                                            <label for="appointmentTime">وقت الموعد</label>
+                                            <input type="time" class="form-control" id="appointmentTime" name="appointment_time" required>
+                                        </div>
+                                    </div>
+                                    
+                                    <div class="d-flex justify-content-end mt-3">
+                                        <button type="submit" name="schedule_appointment" class="btn btn-appointment">تأكيد الموعد</button>
+                                    </div>
+                                </form>
+                            </div>
                         </div>
+                    </div>
+                </div>
+                <?php elseif (isset($_GET['action']) && $_GET['action'] === 'success'): ?>
+                <div class="card">
+                    <div class="card-body success-message">
+                        <i class="fas fa-check-circle"></i>
+                        <h5><?= $successMessage ?></h5>
+                        <p class="text-muted">يمكنك اختيار رسالة أخرى من القائمة</p>
                     </div>
                 </div>
                 <?php else: ?>
@@ -399,7 +527,7 @@ try {
                     <div class="card-body text-center py-5">
                         <i class="fas fa-envelope-open-text fa-3x mb-3 text-muted"></i>
                         <h5>اختر رسالة لعرض التفاصيل</h5>
-                        <p class="text-muted">اضغط على أي رسالة من القائمة لعرض محتواها وخيارات التعيين</p>
+                        <p class="text-muted">اضغط على أي رسالة من القائمة لعرض محتواها واتخاذ الإجراء المناسب</p>
                     </div>
                 </div>
                 <?php endif; ?>
@@ -423,9 +551,21 @@ $(document).ready(function() {
 
     // Handle form submission
     $('form').submit(function(e) {
-        if ($('#doctorSelect').val() === '') {
+        if ($(this).find('select[required]').val() === '') {
             e.preventDefault();
-            alert('الرجاء اختيار طبيب لتعيين المريض إليه');
+            alert('الرجاء اختيار الطبيب المطلوب');
+        }
+    });
+    
+    // Set minimum time to current time + 1 hour when today is selected
+    $('#appointmentDate').change(function() {
+        const today = new Date().toISOString().split('T')[0];
+        if ($(this).val() === today) {
+            const now = new Date();
+            const nextHour = (now.getHours() + 1) % 24;
+            $('#appointmentTime').attr('min', `${nextHour.toString().padStart(2, '0')}:${now.getMinutes().toString().padStart(2, '0')}`);
+        } else {
+            $('#appointmentTime').removeAttr('min');
         }
     });
 });
